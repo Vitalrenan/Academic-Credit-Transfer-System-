@@ -23,4 +23,4 @@ COPY . .
 EXPOSE 8080
 
 # Comando para rodar a aplicação mapeando para a porta do Cloud Run
-CMD ["streamlit", "run", "main.py", "--server.port=8080", "--server.address=0.0.0.0"]
+CMD ["streamlit", "run", "main.py", "--server.port=8080", "--server.address=0.0.0.0", "--server.enableCORS=false", "--server.enableXsrfProtection=false"]
