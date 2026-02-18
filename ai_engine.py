@@ -1,101 +1,72 @@
-from google import genai
-from google.genai import types
+import google.generativeai as genai
 import json
-import re
 
-def clean_json_string(text):
-    """Limpeza cirúrgica para garantir JSON válido."""
-    # Remove blocos markdown (```json ... ```)
-    text = re.sub(r"```json", "", text)
-    text = re.sub(r"```", "", text)
-    
-    # Isola o objeto JSON (encontra o primeiro { e o último })
-    start = text.find('{')
-    end = text.rfind('}')
-    
-    if start != -1 and end != -1:
-        return text[start : end + 1]
-    
-    return text.strip()
-
-def analyze_equivalence_high_accuracy(api_key, text_student, text_syllabus):
-    if not api_key:
-        return {"nome_aluno": "Erro: API Key não fornecida", "analise": []}, None
-
+def analyze_equivalence_high_accuracy(api_key, txt_student, txt_matrix):
+    """
+    Motor de análise utilizando Gemini 2.5 Pro para máxima precisão em equivalências.
+    """
     try:
-        # --- NOVA SINTAXE (Client v1.0 / 2026) ---
-        client = genai.Client(api_key=api_key)
+        # Configuração da API
+        genai.configure(api_key=api_key)
         
-        # Vamos usar o Gemini 2.5 Pro (Equilíbrio perfeito de raciocínio e custo)
-        # Se quiser mais velocidade, troque por 'gemini-2.5-flash'
-        MODEL_ID = 'gemini-2.5-pro' 
-        
+        # Instanciando o Gemini 2.5 Pro
+        # O modelo 2.5 Pro lida melhor com contextos longos de históricos e matrizes
+        model = genai.GenerativeModel(
+            model_name="gemini-2.5-pro",
+            generation_config={
+                "response_mime_type": "application/json",
+                "temperature": 0.1,  # Baixa temperatura para evitar alucinações acadêmicas
+            }
+        )
+
         prompt = f"""
-        Você é um Coordenador Acadêmico Especialista.
-        
-        TAREFA: Comparar Histórico Escolar (Origem) com Matriz Curricular (Destino).
-        
-        DOCUMENTO 1 (Histórico do Aluno):
-        {text_student[:50000]}
+        Você é o Coordenador de IA da Cruzeiro do Sul, especialista em análise curricular.
+        Sua tarefa é cruzar os dados do Histórico Escolar com a Matriz Curricular Alvo.
 
-        DOCUMENTO 2 (Matriz da Instituição):
-        {text_syllabus[:50000]}
+        DIRETRIZES TÉCNICAS:
+        1. Compare as ementas e nomes das disciplinas. 
+        2. Considere similaridade fonética e semântica (ex: "Cálculo I" e "Cálculo Diferencial e Integral I" são equivalentes).
+        3. DEFERIDO: Se houver correspondência clara (>= 70%).
+        4. INDEFERIDO: Se não houver correspondência ou a carga horária for drasticamente menor.
 
-        OBJETIVO:
-        1. Identificar o Nome do Aluno.
-        2. Listar disciplinas APROVADAS no histórico e encontrar equivalentes na matriz.
-        3. Para cada par, decidir: DEFERIDO (Equivalente) ou INDEFERIDO.
-        
-        FORMATO JSON OBRIGATÓRIO:
+        CONTEXTO DO ESTUDANTE:
+        {txt_student[:20000]} 
+
+        MATRIZ DE REFERÊNCIA (CRUZEIRO DO SUL):
+        {txt_matrix[:20000]}
+
+        SAÍDA OBRIGATÓRIA EM JSON:
         {{
-            "nome_aluno": "Nome Completo",
-            "analise": [
-                {{
-                    "Disciplina_Origem": "Nome no histórico",
-                    "Disciplina_Destino": "Nome na matriz",
-                    "Carga_Horaria_Comparada": "Ex: 60h vs 80h",
-                    "Similaridade": 0.95,
-                    "Veredito": "DEFERIDO",
-                    "Justificativa": "Explicação técnica"
-                }}
-            ]
+          "nome_aluno": "Nome extraído do documento",
+          "analise": [
+            {{
+              "Disciplina_Origem": "Nome da matéria cursada no histórico",
+              "Disciplina_Destino": "Nome da matéria equivalente na matriz alvo",
+              "Similaridade": 0.0 a 1.0,
+              "Veredito": "DEFERIDO" ou "INDEFERIDO",
+              "Justificativa": "Racional técnico da decisão"
+            }}
+          ]
         }}
         """
 
-        # Configuração da Geração
-        response = client.models.generate_content(
-            model=MODEL_ID,
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                temperature=0.1, # Baixa temperatura para precisão
-                response_mime_type='application/json' # Força JSON estruturado
-            )
-        )
+        response = model.generate_content(prompt)
         
-        # Processamento da resposta
-        cleaned_text = clean_json_string(response.text)
-        
-        try:
-            data = json.loads(cleaned_text)
-        except:
-            # Fallback: remove quebras de linha se o JSON estiver quebrado
-            cleaned_text = cleaned_text.replace('\n', ' ')
-            data = json.loads(cleaned_text)
+        if not response.text:
+            return {"analise": [], "erro": "A API não retornou texto."}, None
 
-        # Garante estrutura mínima para não quebrar a tela
-        if "analise" not in data: data["analise"] = []
-        if "nome_aluno" not in data: data["nome_aluno"] = "Aluno Não Identificado"
-            
-        return data, response.usage_metadata
+        # Parsing seguro do JSON
+        try:
+            data = json.loads(response.text)
+            return data, response.usage_metadata
+        except json.JSONDecodeError:
+            # Fallback para limpeza de caracteres caso a IA envie markdown
+            clean_text = response.text.replace("```json", "").replace("```", "").strip()
+            return json.loads(clean_text), response.usage_metadata
 
     except Exception as e:
+        # Se o erro 404 persistir, o sistema reportará exatamente o modelo tentado
         error_msg = str(e)
-        print(f"Erro Engine: {error_msg}")
-        
-        user_msg = f"Erro Técnico: {error_msg[:100]}"
         if "404" in error_msg:
-            user_msg = f"Erro 404: O modelo {MODEL_ID} não está habilitado na sua chave."
-        elif "429" in error_msg:
-            user_msg = "Erro 429: Cota excedida. Aguarde um momento."
-            
-        return {"nome_aluno": user_msg, "analise": []}, None
+            error_msg = f"Modelo gemini-2.5-pro não encontrado ou acesso não autorizado para esta API Key. {error_msg}"
+        return {"analise": [], "erro": error_msg}, None

@@ -1,11 +1,9 @@
 import streamlit as st
 import pandas as pd
-import base64
-import time
 import os
-from google import genai
-from ai_engine import analyze_equivalence_high_accuracy
 import PyPDF2
+from ai_engine import analyze_equivalence_high_accuracy
+import re
 
 # --- 1. CONFIGURAÇÃO DA PÁGINA ---
 st.set_page_config(
@@ -31,172 +29,161 @@ if "student_name" not in st.session_state:
 # --- 3. MODAL DE LOGIN ---
 @st.dialog("Acesso ao Sistema DataEDUCA")
 def login_modal():
-    st.write("Identifique-se para aceder ao sistema de validação.")
-    nome = st.text_input("Nome do Validador")
-    email = st.text_input("E-mail Corporativo")
+    st.markdown("### 🔐 Área Restrita")
+    nome = st.text_input("Nome do Validador", placeholder="Ex: Renan")
+    email = st.text_input("E-mail Corporativo", placeholder="seu@email.com")
     
-    if st.button("Entrar", type="primary"):
+    if st.button("Entrar", type="primary", use_container_width=True):
         if nome and "@" in email:
             st.session_state.user_info = {"nome": nome, "email": email}
             st.rerun()
-        else:
-            st.error("Por favor, insira dados válidos.")
 
 if not st.session_state.user_info:
     login_modal()
     st.stop()
 
-# --- 4. BRANDING ---
-image_path = "logo.png" 
-if os.path.exists(image_path):
-    st.image(image_path, width=600)
-else:
-    st.markdown(
-        """
-        <div style="background-color: #003580; color: white; padding: 15px 5px; border-radius: 8px; text-align: center; width: 200px;">
-            <div style="font-size: 24px;">⭐</div>
-            <div style="font-weight: bold; font-size: 14px;">CRUZEIRO<br>DO SUL</div>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-
-st.title("Transferência de Créditos - Análise de Equivalência")
-st.markdown(f"**Validador:** {st.session_state.user_info['nome']} | **Tecnologia:** Gemini 2.5 Pro")
-
-st.divider()
-
-# --- 5. FUNÇÕES UTILITÁRIAS ---
-
-def calcular_custo(usage):
-    if not usage: return 0.0, 0
-    try:
-        input_tokens = getattr(usage, 'prompt_token_count', 0)
-        output_tokens = getattr(usage, 'candidates_token_count', 0)
-        total_tokens = getattr(usage, 'total_token_count', 0)
-        custo_usd = (input_tokens / 1_000_000 * 1.25) + (output_tokens / 1_000_000 * 3.75)
-        return custo_usd * 6.00, total_tokens
-    except:
-        return 0.0, 0
-
+# --- 4. FUNÇÕES UTILITÁRIAS ---
 def extract_text(uploaded_file):
     if not uploaded_file: return ""
     uploaded_file.seek(0)
     try:
+        text = ""
         if uploaded_file.name.endswith('.pdf'):
             reader = PyPDF2.PdfReader(uploaded_file)
-            return "".join([page.extract_text() or "" for page in reader.pages])
+            text = "".join([page.extract_text() or "" for page in reader.pages])
         elif uploaded_file.name.endswith('.xlsx'):
             df = pd.read_excel(uploaded_file, engine='openpyxl')
-            return df.to_string()
+            text = df.to_string()
         elif uploaded_file.name.endswith('.txt'):
-            return uploaded_file.read().decode("utf-8")
+            text = uploaded_file.read().decode("utf-8")
+        
+        text = text.replace('\x00', '')
+        text = re.sub(r'\s+', ' ', text) 
+        return text.strip()
     except Exception as e:
-        return f"Erro de Leitura: {str(e)}"
-    return ""
+        return f"Erro: {str(e)}"
 
-# --- 6. BARRA LATERAL ---
+# --- 5. BARRA LATERAL ---
 with st.sidebar:
     st.header("⚙️ Configurações")
     api_key = st.text_input("Gemini API Key", type="password")
     file_student = st.file_uploader("Histórico do Aluno (PDF/TXT)", type=['pdf', 'txt'])
     file_matrix = st.file_uploader("Matriz de Referência (XLSX)", type=['xlsx'])
+    
     btn_run = st.button("🚀 Iniciar Análise IA", type="primary", use_container_width=True)
+    
+    if st.button("🗑️ Reiniciar Sessão", use_container_width=True):
+        for key in ["raw_result", "analise_confirmada", "dados_finais", "student_name"]:
+            st.session_state[key] = None if key != "analise_confirmada" else False
+        st.rerun()
 
-# --- 7. LÓGICA DE PROCESSAMENTO ---
+# --- 6. LÓGICA DE PROCESSAMENTO ---
 if btn_run:
     if not api_key or not file_student or not file_matrix:
-        st.warning("Preencha a API Key e carregue os documentos.")
+        st.warning("Carregue os arquivos e insira a API Key.")
     else:
-        with st.spinner("🤖 Analisando matriz completa e histórico..."):
+        with st.spinner("🤖 O Gemini 2.5 Pro está a processar..."):
             txt_student = extract_text(file_student)
             txt_matrix = extract_text(file_matrix)
             data, usage = analyze_equivalence_high_accuracy(api_key, txt_student, txt_matrix)
-            if data:
-                df = pd.DataFrame(data.get("analise", []))
-                if not df.empty:
-                    df["Aprovar"] = df["Veredito"].apply(lambda x: True if x == "DEFERIDO" else False)
+            
+            if data and "analise" in data and len(data["analise"]) > 0:
+                df = pd.DataFrame(data["analise"])
+                df.columns = [c.strip() for c in df.columns]
+                col_v = next((c for c in df.columns if "Veredito" in c), "Veredito")
+                df["Aprovar"] = df[col_v].apply(lambda x: True if str(x).upper() == "DEFERIDO" else False)
+                
                 st.session_state.raw_result = df
                 st.session_state.student_name = data.get("nome_aluno", "Não Identificado")
                 st.session_state.usage_data = usage
                 st.session_state.analise_confirmada = False
                 st.rerun()
 
-# --- 8. INTERFACE DE ABAS ---
-if file_student or file_matrix:
-    abas = ["📄 Documentos", "🤖 Validação IA"]
+# --- 7. INTERFACE DE ABAS ---
+if file_student or file_matrix or st.session_state.raw_result is not None:
+    # Lógica de abas dinâmicas
+    titulos = ["📄 Documentos"]
+    if st.session_state.raw_result is not None:
+        titulos.append("🤖 Validação IA")
     if st.session_state.analise_confirmada:
-        abas.append("✅ Relatório Final")
-    tabs = st.tabs(abas)
+        titulos.append("✅ Relatório Final")
+    
+    tabs = st.tabs(titulos)
 
-    # --- ABA 1: DOCUMENTOS (ESTRUTURA SOLICITADA) ---
+    # --- ABA 1: DOCUMENTOS (APENAS CARDS) ---
     with tabs[0]:
-        col_esq, col_dir = st.columns(2)
+        c1, c2 = st.columns([0.6, 0.4])
+        with c1:
+            st.subheader("📑 Disciplinas Identificadas")
+            texto_raw = extract_text(file_student)
+            
+            with st.container(border=True):
+                nome_aluno = re.search(r"Nome:\s*(.*)", texto_raw)
+                #st.markdown(f"#### 👤 {nome_aluno.group(1) if nome_aluno else 'Estudante'}")
+                #st.divider()
+                
+                # Renderiza apenas os cards, sem o texto bruto acima
+                itens = texto_raw.split("DISCIPLINA:")[1:]
+                for item in itens:
+                    linhas = item.strip().split('\n')
+                    nome_d = linhas[0].split("NOTA:")[0].split("---")[0].strip()
+                    status_cor = "#28a745" if "APROVADO" in item.upper() else "#dc3545"
+                    detalhes = linhas[0].split(nome_d)[-1].strip() if "NOTA:" in linhas[0] else ""
+                    
+                    st.markdown(f"""
+                    <div style="background-color: #262730; padding: 12px; border-radius: 8px; border-left: 6px solid {status_cor}; margin-bottom: 12px;">
+                        <div style="font-weight: bold; color: #ffffff; font-size: 16px;">{nome_d}</div>
+                        <div style="font-size: 13px; color: #bdc3c7; margin-top: 4px;">{detalhes}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
         
-        with col_esq:
-            st.subheader("Histórico do Aluno")
-            # Tenta mostrar o histórico como DataFrame se já tiver sido processado pela IA
-            if st.session_state.raw_result is not None:
-                st.markdown("**Versão Processada (DataFrame):**")
-                historico_df = st.session_state.raw_result[["Disciplina_Origem"]].drop_duplicates()
-                st.dataframe(historico_df, use_container_width=True, hide_index=True)
-            
-            st.markdown("**Texto na Íntegra:**")
-            texto_completo = extract_text(file_student)
-            st.text_area("Conteúdo Original", texto_completo, height=400, disabled=True)
-            
-        with col_dir:
-            st.subheader("Matriz Curricular do Curso")
+        with c2:
+            st.subheader("📋 Matriz Alvo")
             if file_matrix:
                 file_matrix.seek(0)
-                df_matriz_view = pd.read_excel(file_matrix, engine='openpyxl')
-                st.dataframe(df_matriz_view, use_container_width=True, height=600)
+                st.dataframe(pd.read_excel(file_matrix), use_container_width=True, height=600)
 
-    # --- ABA 2: VALIDAÇÃO ---
-    with tabs[1]:
-        if st.session_state.raw_result is not None:
+    # --- ABA 2: VALIDAÇÃO IA ---
+    if st.session_state.raw_result is not None:
+        with tabs[1]:
             st.subheader(f"Análise: {st.session_state.student_name}")
             edited_df = st.data_editor(
-                st.session_state.raw_result,
-                column_config={
-                    "Aprovar": st.column_config.CheckboxColumn("Validar?"),
-                    "Similaridade": st.column_config.ProgressColumn("Confiança", min_value=0, max_value=1),
-                    "Justificativa": st.column_config.TextColumn("Racional IA", width="large")
-                },
-                use_container_width=True, hide_index=True
+                st.session_state.raw_result, 
+                use_container_width=True, 
+                hide_index=True,
+                column_config={"Aprovar": st.column_config.CheckboxColumn("Deferir?")}
             )
-            custo_brl, tokens = calcular_custo(st.session_state.usage_data)
-            st.info(f"📊 Tokens: {tokens} | Custo: R$ {custo_brl:.4f}")
-            if st.button("🔒 Confirmar Validação"):
+            if st.button("🔒 Finalizar Parecer"):
                 st.session_state.dados_finais = edited_df
                 st.session_state.analise_confirmada = True
                 st.rerun()
 
-    # --- ABA 3: RELATÓRIO FINAL ---
-    if st.session_state.analise_confirmada:
-        with tabs[2]:
-            df_v = st.session_state.dados_finais
-            aprovadas = df_v[df_v["Aprovar"] == True]
-            nomes_aprovados = aprovadas["Disciplina_Destino"].tolist()
+    # --- ABA 3: RELATÓRIO FINAL (CORREÇÃO DE TELA PRETA) ---
+    if st.session_state.analise_confirmada and st.session_state.dados_finais is not None:
+        with tabs[-1]:
+            st.title("📊 Parecer de Equivalência")
+            df_f = st.session_state.dados_finais
+            col_d = next((c for c in df_f.columns if "Destino" in c), "Disciplina_Destino")
+            aprovadas = df_f[df_f["Aprovar"] == True]
             
-            file_matrix.seek(0)
-            df_m = pd.read_excel(file_matrix, engine='openpyxl')
-            col_n = next((c for c in df_m.columns if any(x in c.lower() for x in ["disciplina", "nome", "matéria"])), df_m.columns[1])
-            df_p = df_m[~df_m[col_n].isin(nomes_aprovados)]
-            
-            st.header(f"Parecer Final: {st.session_state.student_name}")
-            k1, k2, k3 = st.columns(3)
-            k1.metric("Aproveitadas", len(aprovadas))
-            k2.metric("Pendentes", len(df_p))
-            k3.metric("Tokens", tokens)
+            if file_matrix:
+                file_matrix.seek(0)
+                df_m = pd.read_excel(file_matrix)
+                col_n = next((c for c in df_m.columns if any(x in c.lower() for x in ["disciplina", "nome"])), df_m.columns[0])
+                
+                aprovados_list = [str(x).strip().upper() for x in aprovadas[col_d].tolist()]
+                df_p = df_m[~df_m[col_n].astype(str).str.strip().str.upper().isin(aprovados_list)]
 
-            cl, cr = st.columns(2)
-            with cl:
-                st.success("### ✅ Aprovadas")
-                st.table(aprovadas[["Disciplina_Origem", "Disciplina_Destino"]])
-            with cr:
-                st.warning("### 📚 Grade Restante (Pendente)")
-                st.table(df_p[[col_n]])
-
-            report = f"ALUNO: {st.session_state.student_name}\n\nPENDENTES:\n{df_p[col_n].to_string(index=False)}"
-            st.download_button("📥 Baixar Relatório", report, file_name="plano_estudos.txt")
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Dispensadas", len(aprovadas))
+                m2.metric("Pendentes", len(df_p))
+                m3.metric("Aproveitamento", f"{(len(aprovadas)/len(df_m)*100):.1f}%" if len(df_m)>0 else "0%")
+                
+                st.divider()
+                r1, r2 = st.columns(2)
+                with r1:
+                    st.success("### ✅ Matérias Aproveitadas")
+                    st.dataframe(aprovadas, use_container_width=True, hide_index=True)
+                with r2:
+                    st.warning("### 📚 Plano de Estudos")
+                    st.dataframe(df_p[[col_n]], use_container_width=True, hide_index=True)
